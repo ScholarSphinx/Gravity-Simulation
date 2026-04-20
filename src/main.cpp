@@ -46,6 +46,14 @@ struct Body
     std::string name{"UNNAMED"};
     GLuint textureId = 0;
     bool isBlackHole = false;
+    bool isMoon = false;
+    std::string parentName{};
+    float moonOrbitRadius = 0.0f;
+    float moonOrbitPhase = 0.0f;
+    float moonOrbitRate = 0.0f;
+    float axialTiltDeg = 0.0f;
+    float spinRate = 0.0f; // radians per simulation second
+    float spinAngle = 0.0f;
     std::deque<glm::vec3> trail{};
 };
 
@@ -61,6 +69,10 @@ GLsizei gSphereIndexCount = 0;
 GLuint gGridVao = 0;
 GLuint gGridVbo = 0;
 GLsizei gGridVertexCount = 0;
+GLuint gRingVao = 0;
+GLuint gRingVbo = 0;
+GLuint gRingEbo = 0;
+GLsizei gRingIndexCount = 0;
 
 glm::mat4 gView{};
 glm::mat4 gProjection{};
@@ -126,6 +138,7 @@ uniform vec3 uViewPos;
 uniform float uEmissive;
 uniform sampler2D uTex;
 uniform float uUseTexture;
+uniform float uAlpha;
 
 out vec4 FragColor;
 
@@ -140,11 +153,13 @@ void main()
     float spec = pow(max(dot(n, halfway), 0.0), 48.0);
     float ambient = 0.08;
 
-    vec3 texColor = texture(uTex, vTexCoord).rgb;
+    vec4 texel = texture(uTex, vTexCoord);
+    vec3 texColor = texel.rgb;
     vec3 baseColor = mix(uColor, texColor, uUseTexture);
     vec3 lit = baseColor * (ambient + 0.95 * diff) + vec3(0.9) * spec * 0.4;
     lit += uColor * uEmissive;
-    FragColor = vec4(lit, 1.0);
+    float alpha = mix(1.0, texel.a, uUseTexture) * uAlpha;
+    FragColor = vec4(lit, alpha);
 }
 )";
 
@@ -223,6 +238,20 @@ GLuint createTextureFromData(int w, int h, const std::vector<unsigned char>& dat
     return tex;
 }
 
+GLuint createTextureFromDataRGBA(int w, int h, const std::vector<unsigned char>& data)
+{
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    return tex;
+}
+
 GLuint makePlanetTexture(const glm::vec3& baseColor, float stripeStrength, float roughness, bool hasIceCap)
 {
     constexpr int kTexSize = 512;
@@ -279,6 +308,39 @@ GLuint makeSunTexture()
     return createTextureFromData(kTexSize, kTexSize, pixels);
 }
 
+GLuint makeSaturnRingTexture()
+{
+    constexpr int kW = 2048;
+    constexpr int kH = 256;
+    std::vector<unsigned char> pixels(static_cast<size_t>(kW) * kH * 4);
+    for (int y = 0; y < kH; ++y)
+    {
+        float v = static_cast<float>(y) / static_cast<float>(kH - 1); // radial coordinate
+        float edgeFade = glm::smoothstep(0.02f, 0.12f, v) * (1.0f - glm::smoothstep(0.88f, 0.98f, v));
+        for (int x = 0; x < kW; ++x)
+        {
+            float u = static_cast<float>(x) / static_cast<float>(kW - 1);
+            float radialBands = 0.5f + 0.5f * std::sin(v * 210.0f + hashNoise(v * 45.0f, u * 4.0f, 3.0f) * 6.0f);
+            float azimuthNoise = (hashNoise(u * 75.0f, v * 18.0f, 9.0f) - 0.5f) * 0.15f;
+            float ringGap = glm::smoothstep(0.74f, 0.79f, std::abs(std::sin(v * 38.0f + 0.6f)));
+            float alpha = edgeFade * (0.38f + radialBands * 0.44f) * (1.0f - 0.45f * ringGap);
+            alpha *= 0.85f + azimuthNoise;
+            alpha = glm::clamp(alpha, 0.0f, 0.95f);
+
+            float brightness = 0.55f + radialBands * 0.38f + azimuthNoise;
+            glm::vec3 color = glm::vec3(0.78f, 0.71f, 0.61f) * brightness;
+            color = glm::clamp(color, glm::vec3(0.22f), glm::vec3(0.97f));
+
+            size_t idx = static_cast<size_t>(y * kW + x) * 4;
+            pixels[idx + 0] = static_cast<unsigned char>(color.r * 255.0f);
+            pixels[idx + 1] = static_cast<unsigned char>(color.g * 255.0f);
+            pixels[idx + 2] = static_cast<unsigned char>(color.b * 255.0f);
+            pixels[idx + 3] = static_cast<unsigned char>(alpha * 255.0f);
+        }
+    }
+    return createTextureFromDataRGBA(kW, kH, pixels);
+}
+
 void initializeTextures()
 {
     gFallbackTexture = makePlanetTexture({0.6f, 0.6f, 0.6f}, 0.0f, 0.15f, false);
@@ -294,6 +356,7 @@ void initializeTextures()
     gTextureCache["NEPTUNE"] = makePlanetTexture({0.28f, 0.43f, 0.90f}, 0.09f, 0.06f, false);
     gTextureCache["PLUTO"] = makePlanetTexture({0.72f, 0.67f, 0.60f}, 0.06f, 0.16f, false);
     gTextureCache["BLACK HOLE"] = makePlanetTexture({0.05f, 0.05f, 0.07f}, 0.0f, 0.0f, false);
+    gTextureCache["SATURN_RING"] = makeSaturnRingTexture();
 }
 
 GLuint textureForBodyName(const std::string& bodyName)
@@ -311,6 +374,24 @@ GLuint textureForBodyName(const std::string& bodyName)
 void assignBodyTexture(Body& body)
 {
     body.textureId = textureForBodyName(body.name);
+}
+
+void applySpinDefaults(Body& body)
+{
+    if (body.name == "SUN") { body.spinRate = 0.18f; body.axialTiltDeg = 7.0f; return; }
+    if (body.name == "MERCURY") { body.spinRate = 0.05f; body.axialTiltDeg = 0.1f; return; }
+    if (body.name == "VENUS") { body.spinRate = -0.03f; body.axialTiltDeg = 177.0f; return; }
+    if (body.name == "EARTH") { body.spinRate = 0.85f; body.axialTiltDeg = 23.4f; return; }
+    if (body.name == "MOON") { body.spinRate = 0.08f; body.axialTiltDeg = 6.7f; return; }
+    if (body.name == "MARS") { body.spinRate = 0.78f; body.axialTiltDeg = 25.2f; return; }
+    if (body.name == "JUPITER") { body.spinRate = 1.15f; body.axialTiltDeg = 3.1f; return; }
+    if (body.name == "SATURN") { body.spinRate = 0.95f; body.axialTiltDeg = 26.7f; return; }
+    if (body.name == "URANUS") { body.spinRate = 0.52f; body.axialTiltDeg = 97.8f; return; }
+    if (body.name == "NEPTUNE") { body.spinRate = 0.72f; body.axialTiltDeg = 28.3f; return; }
+    if (body.name == "PLUTO") { body.spinRate = 0.11f; body.axialTiltDeg = 122.5f; return; }
+    if (body.name.find("BLACK HOLE") != std::string::npos) { body.spinRate = 0.42f; body.axialTiltDeg = 12.0f; return; }
+    body.spinRate = 0.45f;
+    body.axialTiltDeg = 8.0f;
 }
 
 void updateCameraView()
@@ -464,6 +545,7 @@ void seedSolarSystem()
     sun.name = "SUN";
     sun.color = {1.0f, 0.77f, 0.18f};
     assignBodyTexture(sun);
+    applySpinDefaults(sun);
     addBody(sun);
 
     auto makeOrbitPlanet = [&](const std::string& name, float orbitalRadius, float mass, float radius, const glm::vec3& color, float speedFactor = 1.0f) {
@@ -476,6 +558,7 @@ void seedSolarSystem()
         p.name = name;
         p.color = color;
         assignBodyTexture(p);
+        applySpinDefaults(p);
         return addBody(p);
     };
 
@@ -491,16 +574,18 @@ void seedSolarSystem()
 
     Body moon;
     moon.name = "MOON";
-    moon.mass = 0.012f;
+    moon.mass = 0.0085f;
     moon.radius = 0.11f;
     moon.color = {0.85f, 0.85f, 0.9f};
-    moon.position = gBodies[earthIdx].position + glm::vec3(0.85f, 0.0f, 0.0f);
-    const glm::vec3 earthMoonR = moon.position - gBodies[earthIdx].position;
-    const float moonR = glm::length(earthMoonR);
-    const glm::vec3 moonTangent = glm::normalize(glm::cross(glm::vec3(0.0f, 1.0f, 0.0f), glm::normalize(earthMoonR)));
-    const float moonSpeed = std::sqrt(kG * gBodies[earthIdx].mass / moonR);
-    moon.velocity = gBodies[earthIdx].velocity + moonTangent * moonSpeed;
+    moon.isMoon = true;
+    moon.parentName = "EARTH";
+    moon.moonOrbitRadius = 0.92f;
+    moon.moonOrbitPhase = 0.2f;
+    moon.moonOrbitRate = std::sqrt(kG * gBodies[earthIdx].mass / (moon.moonOrbitRadius * moon.moonOrbitRadius * moon.moonOrbitRadius));
+    moon.position = gBodies[earthIdx].position + glm::vec3(moon.moonOrbitRadius, 0.06f, 0.0f);
+    moon.velocity = gBodies[earthIdx].velocity;
     assignBodyTexture(moon);
+    applySpinDefaults(moon);
     addBody(moon);
 }
 
@@ -531,6 +616,7 @@ void spawnPlanet()
     p.color = {cDist(gRng), cDist(gRng), cDist(gRng)};
     p.textureId = makePlanetTexture(p.color, 0.10f + cDist(gRng) * 0.26f, 0.06f + cDist(gRng) * 0.20f, cDist(gRng) > 0.74f);
     gDynamicTextures.push_back(p.textureId);
+    applySpinDefaults(p);
     addBody(p);
 }
 
@@ -550,6 +636,7 @@ void spawnBlackHole()
     bh.color = {0.05f, 0.05f, 0.08f};
     bh.isBlackHole = true;
     assignBodyTexture(bh);
+    applySpinDefaults(bh);
     addBody(bh);
 }
 
@@ -610,6 +697,64 @@ void buildSphereMesh(int stacks, int slices)
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gSphereEbo);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(indices.size() * sizeof(unsigned int)), indices.data(), GL_STATIC_DRAW);
 
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(0));
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, uv)));
+    glEnableVertexAttribArray(2);
+    glBindVertexArray(0);
+}
+
+void buildRingMesh(float innerRadius, float outerRadius, int segments)
+{
+    struct Vertex
+    {
+        glm::vec3 pos;
+        glm::vec3 normal;
+        glm::vec2 uv;
+    };
+
+    std::vector<Vertex> vertices;
+    std::vector<unsigned int> indices;
+    vertices.reserve(static_cast<size_t>(segments + 1) * 2);
+    indices.reserve(static_cast<size_t>(segments) * 6);
+
+    for (int i = 0; i <= segments; ++i)
+    {
+        float t = static_cast<float>(i) / static_cast<float>(segments);
+        float angle = t * glm::two_pi<float>();
+        float c = std::cos(angle);
+        float s = std::sin(angle);
+
+        vertices.push_back({glm::vec3(innerRadius * c, 0.0f, innerRadius * s), glm::vec3(0.0f, 1.0f, 0.0f), glm::vec2(t, 0.0f)});
+        vertices.push_back({glm::vec3(outerRadius * c, 0.0f, outerRadius * s), glm::vec3(0.0f, 1.0f, 0.0f), glm::vec2(t, 1.0f)});
+    }
+
+    for (int i = 0; i < segments; ++i)
+    {
+        unsigned int a = static_cast<unsigned int>(i * 2);
+        unsigned int b = a + 1;
+        unsigned int c = a + 2;
+        unsigned int d = a + 3;
+        indices.push_back(a);
+        indices.push_back(c);
+        indices.push_back(b);
+        indices.push_back(b);
+        indices.push_back(c);
+        indices.push_back(d);
+    }
+
+    gRingIndexCount = static_cast<GLsizei>(indices.size());
+    glGenVertexArrays(1, &gRingVao);
+    glGenBuffers(1, &gRingVbo);
+    glGenBuffers(1, &gRingEbo);
+
+    glBindVertexArray(gRingVao);
+    glBindBuffer(GL_ARRAY_BUFFER, gRingVbo);
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(vertices.size() * sizeof(Vertex)), vertices.data(), GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gRingEbo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(indices.size() * sizeof(unsigned int)), indices.data(), GL_STATIC_DRAW);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(0));
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
@@ -716,6 +861,11 @@ void resolveCollisions()
                 merged.color = (gBodies[i].color * m1 + gBodies[j].color * m2) / m;
                 merged.isBlackHole = gBodies[i].isBlackHole || gBodies[j].isBlackHole;
                 merged.name = (gBodies[i].mass >= gBodies[j].mass) ? gBodies[i].name : gBodies[j].name;
+                merged.spinRate = (gBodies[i].spinRate * m1 + gBodies[j].spinRate * m2) / m;
+                merged.spinAngle = (gBodies[i].spinAngle + gBodies[j].spinAngle) * 0.5f;
+                merged.axialTiltDeg = (gBodies[i].axialTiltDeg * m1 + gBodies[j].axialTiltDeg * m2) / m;
+                merged.isMoon = false;
+                merged.parentName.clear();
 
                 if (merged.isBlackHole)
                 {
@@ -750,11 +900,27 @@ void integratePhysics()
 {
     const size_t n = gBodies.size();
     std::vector<glm::vec3> accel(n, glm::vec3(0.0f));
+    std::vector<bool> dynamicBody(n, true);
+    for (size_t i = 0; i < n; ++i)
+    {
+        if (gBodies[i].isMoon && !gBodies[i].parentName.empty())
+        {
+            dynamicBody[i] = false;
+        }
+    }
 
     for (size_t i = 0; i < n; ++i)
     {
+        if (!dynamicBody[i])
+        {
+            continue;
+        }
         for (size_t j = i + 1; j < n; ++j)
         {
+            if (!dynamicBody[j])
+            {
+                continue;
+            }
             glm::vec3 rVec = gBodies[j].position - gBodies[i].position;
             float dist2 = glm::dot(rVec, rVec) + kSoftening;
             float dist = std::sqrt(dist2);
@@ -782,8 +948,43 @@ void integratePhysics()
 
     for (size_t i = 0; i < n; ++i)
     {
-        gBodies[i].velocity += accel[i] * kTimeStep;
-        gBodies[i].position += gBodies[i].velocity * kTimeStep;
+        gBodies[i].spinAngle += gBodies[i].spinRate * kTimeStep;
+        if (dynamicBody[i])
+        {
+            gBodies[i].velocity += accel[i] * kTimeStep;
+            gBodies[i].position += gBodies[i].velocity * kTimeStep;
+        }
+    }
+
+    // Keep moons in clear revolutions around their parent planet for visual stability.
+    for (size_t i = 0; i < n; ++i)
+    {
+        if (!(gBodies[i].isMoon && !gBodies[i].parentName.empty()))
+        {
+            continue;
+        }
+        auto parentIt = std::find_if(gBodies.begin(), gBodies.end(), [&](const Body& b) { return b.name == gBodies[i].parentName; });
+        if (parentIt == gBodies.end())
+        {
+            continue;
+        }
+        Body& moon = gBodies[i];
+        const Body& parent = *parentIt;
+        moon.moonOrbitPhase += moon.moonOrbitRate * kTimeStep;
+        glm::vec3 offset{
+            std::cos(moon.moonOrbitPhase) * moon.moonOrbitRadius,
+            std::sin(moon.moonOrbitPhase * 0.55f) * (moon.moonOrbitRadius * 0.16f),
+            std::sin(moon.moonOrbitPhase) * moon.moonOrbitRadius};
+        moon.position = parent.position + offset;
+        glm::vec3 tangent{
+            -std::sin(moon.moonOrbitPhase),
+            std::cos(moon.moonOrbitPhase * 0.55f) * 0.55f * 0.16f,
+            std::cos(moon.moonOrbitPhase)};
+        moon.velocity = parent.velocity + glm::normalize(tangent) * (moon.moonOrbitRadius * moon.moonOrbitRate);
+    }
+
+    for (size_t i = 0; i < n; ++i)
+    {
         gBodies[i].trail.push_back(gBodies[i].position);
         if (gBodies[i].trail.size() > kTrailLength)
         {
@@ -794,9 +995,11 @@ void integratePhysics()
     resolveCollisions();
 }
 
-void drawBody(const Body& body, GLint modelLoc, GLint colorLoc, GLint emissiveLoc, GLint useTextureLoc)
+void drawBody(const Body& body, GLint modelLoc, GLint colorLoc, GLint emissiveLoc, GLint useTextureLoc, GLint alphaLoc)
 {
     glm::mat4 model = glm::translate(glm::mat4(1.0f), body.position);
+    model = glm::rotate(model, glm::radians(body.axialTiltDeg), glm::vec3(0.0f, 0.0f, 1.0f));
+    model = glm::rotate(model, body.spinAngle, glm::vec3(0.0f, 1.0f, 0.0f));
     model = glm::scale(model, glm::vec3(body.radius));
     glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(model));
     glUniform3fv(colorLoc, 1, glm::value_ptr(body.color));
@@ -812,6 +1015,7 @@ void drawBody(const Body& body, GLint modelLoc, GLint colorLoc, GLint emissiveLo
     }
     glUniform1f(emissiveLoc, emissive);
     glUniform1f(useTextureLoc, 1.0f);
+    glUniform1f(alphaLoc, 1.0f);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, body.textureId != 0 ? body.textureId : gFallbackTexture);
 
@@ -819,10 +1023,11 @@ void drawBody(const Body& body, GLint modelLoc, GLint colorLoc, GLint emissiveLo
     glDrawElements(GL_TRIANGLES, gSphereIndexCount, GL_UNSIGNED_INT, nullptr);
 }
 
-void drawTrails(GLint modelLoc, GLint colorLoc, GLint emissiveLoc, GLint useTextureLoc)
+void drawTrails(GLint modelLoc, GLint colorLoc, GLint emissiveLoc, GLint useTextureLoc, GLint alphaLoc)
 {
     glUniform1f(emissiveLoc, 0.0f);
     glUniform1f(useTextureLoc, 0.0f);
+    glUniform1f(alphaLoc, 1.0f);
     glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(glm::mat4(1.0f)));
 
     for (const auto& b : gBodies)
@@ -841,14 +1046,44 @@ void drawTrails(GLint modelLoc, GLint colorLoc, GLint emissiveLoc, GLint useText
     }
 }
 
-void drawGrid(GLint modelLoc, GLint colorLoc, GLint emissiveLoc, GLint useTextureLoc)
+void drawGrid(GLint modelLoc, GLint colorLoc, GLint emissiveLoc, GLint useTextureLoc, GLint alphaLoc)
 {
     glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(glm::mat4(1.0f)));
     glUniform3f(colorLoc, 1.0f, 1.0f, 1.0f);
     glUniform1f(emissiveLoc, 0.55f);
     glUniform1f(useTextureLoc, 0.0f);
+    glUniform1f(alphaLoc, 1.0f);
     glBindVertexArray(gGridVao);
     glDrawArrays(GL_LINES, 0, gGridVertexCount);
+}
+
+void drawSaturnRing(const Body& saturn, GLint modelLoc, GLint colorLoc, GLint emissiveLoc, GLint useTextureLoc, GLint alphaLoc)
+{
+    if (gRingVao == 0 || gRingIndexCount == 0)
+    {
+        return;
+    }
+    auto it = gTextureCache.find("SATURN_RING");
+    if (it == gTextureCache.end())
+    {
+        return;
+    }
+
+    glm::mat4 model = glm::translate(glm::mat4(1.0f), saturn.position);
+    model = glm::rotate(model, glm::radians(saturn.axialTiltDeg), glm::vec3(0.0f, 0.0f, 1.0f));
+    model = glm::rotate(model, saturn.spinAngle, glm::vec3(0.0f, 1.0f, 0.0f));
+    model = glm::scale(model, glm::vec3(saturn.radius * 2.35f));
+
+    glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(model));
+    glUniform3f(colorLoc, 0.85f, 0.78f, 0.66f);
+    glUniform1f(emissiveLoc, 0.02f);
+    glUniform1f(useTextureLoc, 1.0f);
+    glUniform1f(alphaLoc, 0.94f);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, it->second);
+
+    glBindVertexArray(gRingVao);
+    glDrawElements(GL_TRIANGLES, gRingIndexCount, GL_UNSIGNED_INT, nullptr);
 }
 
 void processInput(GLFWwindow* window)
@@ -1010,6 +1245,7 @@ int main()
     gProgram = makeProgram();
     initializeTextures();
     buildSphereMesh(32, 32);
+    buildRingMesh(1.15f, 2.05f, 160);
     seedSolarSystem();
     buildGrid();
 
@@ -1025,6 +1261,7 @@ int main()
     GLint viewPosLoc = glGetUniformLocation(gProgram, "uViewPos");
     GLint emissiveLoc = glGetUniformLocation(gProgram, "uEmissive");
     GLint useTextureLoc = glGetUniformLocation(gProgram, "uUseTexture");
+    GLint alphaLoc = glGetUniformLocation(gProgram, "uAlpha");
     GLint texLoc = glGetUniformLocation(gProgram, "uTex");
     glUniform1i(texLoc, 0);
 
@@ -1064,12 +1301,16 @@ int main()
         glUniform3fv(lightLoc, 1, glm::value_ptr(gLightPos));
         glUniform3fv(viewPosLoc, 1, glm::value_ptr(gCameraPos));
 
-        drawGrid(modelLoc, colorLoc, emissiveLoc, useTextureLoc);
-        drawTrails(modelLoc, colorLoc, emissiveLoc, useTextureLoc);
+        drawGrid(modelLoc, colorLoc, emissiveLoc, useTextureLoc, alphaLoc);
+        drawTrails(modelLoc, colorLoc, emissiveLoc, useTextureLoc, alphaLoc);
 
         for (const auto& b : gBodies)
         {
-            drawBody(b, modelLoc, colorLoc, emissiveLoc, useTextureLoc);
+            drawBody(b, modelLoc, colorLoc, emissiveLoc, useTextureLoc, alphaLoc);
+            if (b.name == "SATURN")
+            {
+                drawSaturnRing(b, modelLoc, colorLoc, emissiveLoc, useTextureLoc, alphaLoc);
+            }
         }
         drawBodyLabels(window);
 
@@ -1084,6 +1325,18 @@ int main()
     if (gGridVao != 0)
     {
         glDeleteVertexArrays(1, &gGridVao);
+    }
+    if (gRingEbo != 0)
+    {
+        glDeleteBuffers(1, &gRingEbo);
+    }
+    if (gRingVbo != 0)
+    {
+        glDeleteBuffers(1, &gRingVbo);
+    }
+    if (gRingVao != 0)
+    {
+        glDeleteVertexArrays(1, &gRingVao);
     }
     if (gSphereEbo != 0)
     {
