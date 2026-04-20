@@ -239,7 +239,7 @@ GLuint makePlanetTexture(const glm::vec3& baseColor, float stripeStrength, float
             float stripes = std::sin(lat * 22.0f + hashNoise(u * 3.0f, v * 7.0f, 1.0f) * 4.0f) * stripeStrength;
             float crater = (hashNoise(u * 28.0f, v * 36.0f, 2.0f) - 0.5f) * roughness;
             float cloud = (hashNoise(u * 10.0f, v * 10.0f, 9.0f) - 0.5f) * 0.12f;
-            float polar = hasIceCap ? std::smoothstep(0.72f, 0.95f, std::abs(std::sin(lat))) : 0.0f;
+            float polar = hasIceCap ? glm::smoothstep(0.72f, 0.95f, std::abs(std::sin(lat))) : 0.0f;
 
             glm::vec3 color = baseColor;
             color += glm::vec3(stripes + crater + cloud);

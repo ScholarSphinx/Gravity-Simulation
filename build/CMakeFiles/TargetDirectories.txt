@@ -1,0 +1,3 @@
+C:/Users/calvi/OneDrive/Documents/GitHub/Gravity Simulation/build/CMakeFiles/GravitySimulation.dir
+C:/Users/calvi/OneDrive/Documents/GitHub/Gravity Simulation/build/CMakeFiles/ALL_BUILD.dir
+C:/Users/calvi/OneDrive/Documents/GitHub/Gravity Simulation/build/CMakeFiles/ZERO_CHECK.dir
