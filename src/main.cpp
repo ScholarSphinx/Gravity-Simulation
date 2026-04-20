@@ -134,29 +134,38 @@ in vec2 vTexCoord;
 
 uniform vec3 uColor;
 uniform vec3 uLightPos;
+uniform vec3 uLightColor;
 uniform vec3 uViewPos;
 uniform float uEmissive;
 uniform sampler2D uTex;
 uniform float uUseTexture;
 uniform float uAlpha;
+uniform float uLightingEnabled;
 
 out vec4 FragColor;
 
 void main()
 {
     vec3 n = normalize(vNormal);
-    vec3 lightDir = normalize(uLightPos - vWorldPos);
+    vec3 lightVec = (uLightPos - vWorldPos);
+    float lightDistance = max(length(lightVec), 0.001);
+    vec3 lightDir = lightVec / lightDistance;
     vec3 viewDir = normalize(uViewPos - vWorldPos);
     vec3 halfway = normalize(lightDir + viewDir);
 
     float diff = max(dot(n, lightDir), 0.0);
     float spec = pow(max(dot(n, halfway), 0.0), 48.0);
-    float ambient = 0.08;
+    float attenuation = 1.0 / (1.0 + 0.01 * lightDistance + 0.0025 * lightDistance * lightDistance);
+    float ambient = 0.16;
 
     vec4 texel = texture(uTex, vTexCoord);
     vec3 texColor = texel.rgb;
     vec3 baseColor = mix(uColor, texColor, uUseTexture);
-    vec3 lit = baseColor * (ambient + 0.95 * diff) + vec3(0.9) * spec * 0.4;
+    float hemi = 0.5 + 0.5 * dot(n, vec3(0.0, 1.0, 0.0));
+    vec3 liftedAmbient = baseColor * (ambient + hemi * 0.12);
+    float wrappedDiff = max((dot(n, lightDir) + 0.35) / 1.35, 0.0);
+    vec3 lit = liftedAmbient + attenuation * (baseColor * uLightColor * 1.05 * wrappedDiff + uLightColor * spec * 0.45);
+    lit = mix(baseColor, lit, uLightingEnabled);
     lit += uColor * uEmissive;
     float alpha = mix(1.0, texel.a, uUseTexture) * uAlpha;
     FragColor = vec4(lit, alpha);
@@ -292,12 +301,25 @@ GLuint makeSunTexture()
     std::vector<unsigned char> pixels(static_cast<size_t>(kTexSize) * kTexSize * 3);
     for (int y = 0; y < kTexSize; ++y)
     {
+        float v = static_cast<float>(y) / static_cast<float>(kTexSize - 1);
+        float lat = (v - 0.5f) * glm::pi<float>();
         for (int x = 0; x < kTexSize; ++x)
         {
             float u = static_cast<float>(x) / static_cast<float>(kTexSize - 1);
-            float v = static_cast<float>(y) / static_cast<float>(kTexSize - 1);
-            float turbulence = hashNoise(u * 12.0f, v * 12.0f, 4.0f) * 0.45f;
-            glm::vec3 c = glm::vec3(1.0f, 0.65f, 0.10f) + glm::vec3(turbulence, turbulence * 0.6f, 0.0f);
+            float lon = u * glm::two_pi<float>();
+            float granulation = hashNoise(u * 28.0f, v * 24.0f, 4.0f) * 0.30f;
+            float bands = 0.5f + 0.5f * std::sin(lat * 15.0f + hashNoise(u * 6.0f, v * 5.0f, 8.0f) * 3.0f);
+            float warmMix = 0.55f + 0.45f * bands;
+            float activity = 0.85f + 0.15f * std::sin(lon * 11.0f + lat * 5.0f);
+            glm::vec3 core = glm::mix(glm::vec3(0.98f, 0.56f, 0.14f), glm::vec3(1.0f, 0.78f, 0.28f), warmMix);
+            float dx = u - 0.5f;
+            float dy = v - 0.5f;
+            float radial = std::sqrt(dx * dx + dy * dy) / 0.7071067f;
+            float limbSoft = 1.0f - glm::smoothstep(0.72f, 1.0f, radial);
+            float warmEdge = 1.0f - glm::smoothstep(0.58f, 0.98f, radial);
+            glm::vec3 c = core * activity + glm::vec3(granulation * 0.25f, granulation * 0.14f, granulation * 0.05f);
+            c *= glm::mix(0.82f, 1.0f, limbSoft);
+            c = glm::mix(c, glm::vec3(1.0f, 0.72f, 0.22f), warmEdge * 0.14f);
             c = glm::clamp(c, glm::vec3(0.0f), glm::vec3(1.0f));
             size_t idx = static_cast<size_t>(y * kTexSize + x) * 3;
             pixels[idx + 0] = static_cast<unsigned char>(c.r * 255.0f);
@@ -323,9 +345,9 @@ GLuint makeSaturnRingTexture()
             float radialBands = 0.5f + 0.5f * std::sin(v * 210.0f + hashNoise(v * 45.0f, u * 4.0f, 3.0f) * 6.0f);
             float azimuthNoise = (hashNoise(u * 75.0f, v * 18.0f, 9.0f) - 0.5f) * 0.15f;
             float ringGap = glm::smoothstep(0.74f, 0.79f, std::abs(std::sin(v * 38.0f + 0.6f)));
-            float alpha = edgeFade * (0.38f + radialBands * 0.44f) * (1.0f - 0.45f * ringGap);
+            float alpha = edgeFade * (0.78f + radialBands * 0.24f) * (1.0f - 0.18f * ringGap);
             alpha *= 0.85f + azimuthNoise;
-            alpha = glm::clamp(alpha, 0.0f, 0.95f);
+            alpha = glm::clamp(alpha, 0.35f, 1.0f);
 
             float brightness = 0.55f + radialBands * 0.38f + azimuthNoise;
             glm::vec3 color = glm::vec3(0.78f, 0.71f, 0.61f) * brightness;
@@ -995,7 +1017,7 @@ void integratePhysics()
     resolveCollisions();
 }
 
-void drawBody(const Body& body, GLint modelLoc, GLint colorLoc, GLint emissiveLoc, GLint useTextureLoc, GLint alphaLoc)
+void drawBody(const Body& body, GLint modelLoc, GLint colorLoc, GLint emissiveLoc, GLint useTextureLoc, GLint alphaLoc, GLint lightingEnabledLoc)
 {
     glm::mat4 model = glm::translate(glm::mat4(1.0f), body.position);
     model = glm::rotate(model, glm::radians(body.axialTiltDeg), glm::vec3(0.0f, 0.0f, 1.0f));
@@ -1013,9 +1035,14 @@ void drawBody(const Body& body, GLint modelLoc, GLint colorLoc, GLint emissiveLo
     {
         emissive = 0.12f;
     }
+    if (body.name == "SUN")
+    {
+        emissive = 0.62f;
+    }
     glUniform1f(emissiveLoc, emissive);
     glUniform1f(useTextureLoc, 1.0f);
     glUniform1f(alphaLoc, 1.0f);
+    glUniform1f(lightingEnabledLoc, body.name == "SUN" ? 0.0f : 1.0f);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, body.textureId != 0 ? body.textureId : gFallbackTexture);
 
@@ -1023,11 +1050,12 @@ void drawBody(const Body& body, GLint modelLoc, GLint colorLoc, GLint emissiveLo
     glDrawElements(GL_TRIANGLES, gSphereIndexCount, GL_UNSIGNED_INT, nullptr);
 }
 
-void drawTrails(GLint modelLoc, GLint colorLoc, GLint emissiveLoc, GLint useTextureLoc, GLint alphaLoc)
+void drawTrails(GLint modelLoc, GLint colorLoc, GLint emissiveLoc, GLint useTextureLoc, GLint alphaLoc, GLint lightingEnabledLoc)
 {
     glUniform1f(emissiveLoc, 0.0f);
     glUniform1f(useTextureLoc, 0.0f);
     glUniform1f(alphaLoc, 1.0f);
+    glUniform1f(lightingEnabledLoc, 0.0f);
     glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(glm::mat4(1.0f)));
 
     for (const auto& b : gBodies)
@@ -1046,18 +1074,19 @@ void drawTrails(GLint modelLoc, GLint colorLoc, GLint emissiveLoc, GLint useText
     }
 }
 
-void drawGrid(GLint modelLoc, GLint colorLoc, GLint emissiveLoc, GLint useTextureLoc, GLint alphaLoc)
+void drawGrid(GLint modelLoc, GLint colorLoc, GLint emissiveLoc, GLint useTextureLoc, GLint alphaLoc, GLint lightingEnabledLoc)
 {
     glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(glm::mat4(1.0f)));
     glUniform3f(colorLoc, 1.0f, 1.0f, 1.0f);
     glUniform1f(emissiveLoc, 0.55f);
     glUniform1f(useTextureLoc, 0.0f);
     glUniform1f(alphaLoc, 1.0f);
+    glUniform1f(lightingEnabledLoc, 0.0f);
     glBindVertexArray(gGridVao);
     glDrawArrays(GL_LINES, 0, gGridVertexCount);
 }
 
-void drawSaturnRing(const Body& saturn, GLint modelLoc, GLint colorLoc, GLint emissiveLoc, GLint useTextureLoc, GLint alphaLoc)
+void drawSaturnRing(const Body& saturn, GLint modelLoc, GLint colorLoc, GLint emissiveLoc, GLint useTextureLoc, GLint alphaLoc, GLint lightingEnabledLoc)
 {
     if (gRingVao == 0 || gRingIndexCount == 0)
     {
@@ -1078,7 +1107,8 @@ void drawSaturnRing(const Body& saturn, GLint modelLoc, GLint colorLoc, GLint em
     glUniform3f(colorLoc, 0.85f, 0.78f, 0.66f);
     glUniform1f(emissiveLoc, 0.02f);
     glUniform1f(useTextureLoc, 1.0f);
-    glUniform1f(alphaLoc, 0.94f);
+    glUniform1f(alphaLoc, 1.0f);
+    glUniform1f(lightingEnabledLoc, 1.0f);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, it->second);
 
@@ -1258,10 +1288,12 @@ int main()
     GLint projectionLoc = glGetUniformLocation(gProgram, "uProjection");
     GLint colorLoc = glGetUniformLocation(gProgram, "uColor");
     GLint lightLoc = glGetUniformLocation(gProgram, "uLightPos");
+    GLint lightColorLoc = glGetUniformLocation(gProgram, "uLightColor");
     GLint viewPosLoc = glGetUniformLocation(gProgram, "uViewPos");
     GLint emissiveLoc = glGetUniformLocation(gProgram, "uEmissive");
     GLint useTextureLoc = glGetUniformLocation(gProgram, "uUseTexture");
     GLint alphaLoc = glGetUniformLocation(gProgram, "uAlpha");
+    GLint lightingEnabledLoc = glGetUniformLocation(gProgram, "uLightingEnabled");
     GLint texLoc = glGetUniformLocation(gProgram, "uTex");
     glUniform1i(texLoc, 0);
 
@@ -1298,18 +1330,25 @@ int main()
         glUseProgram(gProgram);
         glUniformMatrix4fv(viewLoc, 1, GL_FALSE, glm::value_ptr(gView));
         glUniformMatrix4fv(projectionLoc, 1, GL_FALSE, glm::value_ptr(gProjection));
+        const auto sunIt = std::find_if(gBodies.begin(), gBodies.end(), [](const Body& b) { return b.name == "SUN"; });
+        if (sunIt != gBodies.end())
+        {
+            gLightPos = sunIt->position;
+        }
         glUniform3fv(lightLoc, 1, glm::value_ptr(gLightPos));
+        const glm::vec3 warmSunLight{1.0f, 0.74f, 0.48f};
+        glUniform3fv(lightColorLoc, 1, glm::value_ptr(warmSunLight));
         glUniform3fv(viewPosLoc, 1, glm::value_ptr(gCameraPos));
 
-        drawGrid(modelLoc, colorLoc, emissiveLoc, useTextureLoc, alphaLoc);
-        drawTrails(modelLoc, colorLoc, emissiveLoc, useTextureLoc, alphaLoc);
+        drawGrid(modelLoc, colorLoc, emissiveLoc, useTextureLoc, alphaLoc, lightingEnabledLoc);
+        drawTrails(modelLoc, colorLoc, emissiveLoc, useTextureLoc, alphaLoc, lightingEnabledLoc);
 
         for (const auto& b : gBodies)
         {
-            drawBody(b, modelLoc, colorLoc, emissiveLoc, useTextureLoc, alphaLoc);
+            drawBody(b, modelLoc, colorLoc, emissiveLoc, useTextureLoc, alphaLoc, lightingEnabledLoc);
             if (b.name == "SATURN")
             {
-                drawSaturnRing(b, modelLoc, colorLoc, emissiveLoc, useTextureLoc, alphaLoc);
+                drawSaturnRing(b, modelLoc, colorLoc, emissiveLoc, useTextureLoc, alphaLoc, lightingEnabledLoc);
             }
         }
         drawBodyLabels(window);
