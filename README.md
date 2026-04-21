@@ -5,13 +5,22 @@ Using OpenGL and C++ to simulate gravity in space
 - 3D OpenGL rendering of a solar-system-like N-body simulation
 - Newtonian gravity with a relativity-inspired correction term
 - Inelastic collision handling (bodies merge and conserve momentum)
-- White 2D spacetime grid rendered as a dynamic paraboloid warp surface
+- Expanded white 2D spacetime grid rendered as a dynamic paraboloid warp surface
 - Planet orbit trails to visualize orbital paths
 - Per-pixel lighting/shading on spherical celestial bodies with procedural textures
 - Seeded solar system bodies through Pluto, including Earth's Moon
+- Procedural Earth texture with continent/ocean/ice variation
+- Saturn ring system with translucent layered texture and blue polar hex cloud pattern
+- Jupiter texture with a procedural Great Red Spot
+- Kuiper Belt and Oort Cloud visualized as layered mist fields (plus sparse field bodies)
+- Quasar system with spiral accretion disk styling and central luminous jet
+- Runtime asteroid/comet spawning
+- Black holes/quasars absorb nearby comets, asteroids, and cloud particles
 - Runtime spawning with dynamic names:
   - `P`: spawn `PLANET #x`
   - `B`: spawn `BLACK HOLE #x`
+  - `Q`: spawn `QUASAR #x`
+  - `C`: spawn `COMET #x` or `ASTEROID #x`
 - Per-body labels above each object
 - Camera controls for orbit/pan/zoom and reset
 
@@ -102,6 +111,8 @@ Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 - Simulation:
   - `P`: spawn a random planet
   - `B`: spawn a black hole
+  - `Q`: spawn a quasar
+  - `C`: spawn an asteroid/comet
   - `Space`: pause/resume
   - `Esc`: quit
 - Camera:
@@ -110,7 +121,7 @@ Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
   - Mouse wheel: zoom (and adjust FOV)
   - `+` / `-`: zoom in/out
   - `W`, `A`, `S`, `D`: pan forward/left/back/right
-  - `Q` / `E`: pan up/down
+  - `Z` / `X`: pan up/down
   - `R`: reset camera
 
 ## Windows Setup (if tools are missing)

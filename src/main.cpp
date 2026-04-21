@@ -30,11 +30,12 @@ constexpr float kC = 150.0f; // Simulation speed-of-light scale for relativistic
 constexpr float kTimeStep = 0.0026f;
 constexpr size_t kTrailLength = 320;
 
-constexpr float kGridMin = -64.0f;
-constexpr float kGridMax = 64.0f;
-constexpr float kGridStep = 2.0f;
+constexpr float kGridMin = -110.0f;
+constexpr float kGridMax = 110.0f;
+constexpr float kGridStep = 3.0f;
 constexpr float kWarpScale = 120.0f;
 constexpr float kWarpClamp = -5.5f;
+constexpr float kBodySizeScale = 1.16f;
 
 struct Body
 {
@@ -47,6 +48,7 @@ struct Body
     GLuint textureId = 0;
     bool isBlackHole = false;
     bool isMoon = false;
+    bool isFieldParticle = false;
     std::string parentName{};
     float moonOrbitRadius = 0.0f;
     float moonOrbitPhase = 0.0f;
@@ -54,6 +56,7 @@ struct Body
     float axialTiltDeg = 0.0f;
     float spinRate = 0.0f; // radians per simulation second
     float spinAngle = 0.0f;
+    bool showTrail = true;
     std::deque<glm::vec3> trail{};
 };
 
@@ -96,10 +99,14 @@ float gFov = 36.0f;
 
 bool gSpawnPlanetPressed = false;
 bool gSpawnBlackHolePressed = false;
+bool gSpawnQuasarPressed = false;
+bool gSpawnCometPressed = false;
 bool gPausePressed = false;
 bool gPaused = false;
 int gSpawnedPlanetCount = 0;
 int gSpawnedBlackHoleCount = 0;
+int gSpawnedQuasarCount = 0;
+int gSpawnedCometCount = 0;
 
 const char* kVertexShader = R"(
 #version 330 core
@@ -295,6 +302,120 @@ GLuint makePlanetTexture(const glm::vec3& baseColor, float stripeStrength, float
     return createTextureFromData(kTexSize, kTexSize, pixels);
 }
 
+GLuint makeEarthTexture()
+{
+    constexpr int kTexSize = 1024;
+    std::vector<unsigned char> pixels(static_cast<size_t>(kTexSize) * kTexSize * 3);
+    for (int y = 0; y < kTexSize; ++y)
+    {
+        float v = static_cast<float>(y) / static_cast<float>(kTexSize - 1);
+        float lat = (v - 0.5f) * glm::pi<float>();
+        for (int x = 0; x < kTexSize; ++x)
+        {
+            float u = static_cast<float>(x) / static_cast<float>(kTexSize - 1);
+            float lon = u * glm::two_pi<float>();
+            float n1 = hashNoise(u * 5.0f, v * 3.5f, 1.0f);
+            float n2 = hashNoise(u * 13.0f, v * 9.0f, 2.0f);
+            float n3 = hashNoise(u * 35.0f, v * 26.0f, 3.0f);
+            float continent = n1 * 0.55f + n2 * 0.30f + n3 * 0.15f;
+            continent += 0.18f * std::sin(lon * 2.0f + 0.5f) + 0.10f * std::cos(lat * 2.4f);
+            bool isLand = continent > 0.50f;
+
+            glm::vec3 ocean = glm::mix(glm::vec3(0.04f, 0.16f, 0.40f), glm::vec3(0.08f, 0.30f, 0.64f), hashNoise(u * 16.0f, v * 16.0f, 7.0f));
+            glm::vec3 landBase = glm::mix(glm::vec3(0.10f, 0.46f, 0.14f), glm::vec3(0.40f, 0.34f, 0.18f), hashNoise(u * 18.0f, v * 14.0f, 8.0f));
+            float mountain = hashNoise(u * 52.0f, v * 52.0f, 9.0f);
+            glm::vec3 landColor = glm::mix(landBase, glm::vec3(0.62f, 0.60f, 0.56f), glm::smoothstep(0.76f, 1.0f, mountain));
+
+            float ice = glm::smoothstep(0.72f, 0.94f, std::abs(std::sin(lat)));
+            glm::vec3 color = isLand ? landColor : ocean;
+            color = glm::mix(color, glm::vec3(0.93f, 0.96f, 1.0f), ice * 0.9f);
+            color = glm::clamp(color, glm::vec3(0.02f), glm::vec3(1.0f));
+            size_t idx = static_cast<size_t>(y * kTexSize + x) * 3;
+            pixels[idx + 0] = static_cast<unsigned char>(color.r * 255.0f);
+            pixels[idx + 1] = static_cast<unsigned char>(color.g * 255.0f);
+            pixels[idx + 2] = static_cast<unsigned char>(color.b * 255.0f);
+        }
+    }
+    return createTextureFromData(kTexSize, kTexSize, pixels);
+}
+
+GLuint makeJupiterTexture()
+{
+    constexpr int kTexSize = 1024;
+    std::vector<unsigned char> pixels(static_cast<size_t>(kTexSize) * kTexSize * 3);
+    for (int y = 0; y < kTexSize; ++y)
+    {
+        float v = static_cast<float>(y) / static_cast<float>(kTexSize - 1);
+        float lat = (v - 0.5f) * glm::pi<float>();
+        for (int x = 0; x < kTexSize; ++x)
+        {
+            float u = static_cast<float>(x) / static_cast<float>(kTexSize - 1);
+            float lon = u * glm::two_pi<float>();
+            float band = 0.5f + 0.5f * std::sin(lat * 18.0f + hashNoise(u * 8.0f, v * 9.0f, 1.0f) * 3.5f);
+            glm::vec3 base = glm::mix(glm::vec3(0.72f, 0.55f, 0.36f), glm::vec3(0.93f, 0.79f, 0.60f), band);
+            base += glm::vec3((hashNoise(u * 30.0f, v * 24.0f, 2.0f) - 0.5f) * 0.12f);
+
+            // Great Red Spot around southern hemisphere.
+            float spotLon = 1.05f * glm::pi<float>();
+            float spotLat = -0.32f;
+            float dLon = std::abs(lon - spotLon);
+            dLon = std::min(dLon, glm::two_pi<float>() - dLon);
+            float dLat = lat - spotLat;
+            float spot = std::exp(-((dLon * dLon) / 0.11f + (dLat * dLat) / 0.018f));
+            glm::vec3 spotColor = glm::vec3(0.76f, 0.25f, 0.16f);
+            base = glm::mix(base, spotColor, spot * 0.95f);
+
+            base = glm::clamp(base, glm::vec3(0.02f), glm::vec3(1.0f));
+            size_t idx = static_cast<size_t>(y * kTexSize + x) * 3;
+            pixels[idx + 0] = static_cast<unsigned char>(base.r * 255.0f);
+            pixels[idx + 1] = static_cast<unsigned char>(base.g * 255.0f);
+            pixels[idx + 2] = static_cast<unsigned char>(base.b * 255.0f);
+        }
+    }
+    return createTextureFromData(kTexSize, kTexSize, pixels);
+}
+
+GLuint makeSaturnTexture()
+{
+    constexpr int kTexSize = 1024;
+    std::vector<unsigned char> pixels(static_cast<size_t>(kTexSize) * kTexSize * 3);
+    for (int y = 0; y < kTexSize; ++y)
+    {
+        float v = static_cast<float>(y) / static_cast<float>(kTexSize - 1);
+        float lat = (v - 0.5f) * glm::pi<float>();
+        for (int x = 0; x < kTexSize; ++x)
+        {
+            float u = static_cast<float>(x) / static_cast<float>(kTexSize - 1);
+            float lon = u * glm::two_pi<float>();
+            float band = 0.5f + 0.5f * std::sin(lat * 16.0f + hashNoise(u * 6.0f, v * 7.0f, 4.0f) * 2.5f);
+            glm::vec3 base = glm::mix(glm::vec3(0.73f, 0.62f, 0.44f), glm::vec3(0.90f, 0.81f, 0.60f), band);
+            base += glm::vec3((hashNoise(u * 26.0f, v * 26.0f, 5.0f) - 0.5f) * 0.08f);
+
+            // True geometric north-pole hexagon in local cap coordinates.
+            float north = std::sin(lat);
+            float cap = glm::smoothstep(0.68f, 0.82f, north);
+            float capR = (1.0f - north) * 3.2f;
+            float xh = capR * std::cos(lon);
+            float yh = capR * std::sin(lon);
+            float ax = std::abs(xh);
+            float ay = std::abs(yh);
+            float hexDist = std::max(ax * 0.8660254f + ay * 0.5f, ay);
+            float hexFill = 1.0f - glm::smoothstep(0.30f, 0.41f, hexDist);
+            float hexEdge = glm::smoothstep(0.28f, 0.32f, hexDist) * (1.0f - glm::smoothstep(0.32f, 0.38f, hexDist));
+            glm::vec3 powderBlue = glm::vec3(0.66f, 0.80f, 0.98f);
+            base = glm::mix(base, powderBlue, cap * hexFill * 0.92f);
+            base = glm::mix(base, powderBlue * 1.08f, cap * hexEdge * 0.95f);
+
+            base = glm::clamp(base, glm::vec3(0.02f), glm::vec3(1.0f));
+            size_t idx = static_cast<size_t>(y * kTexSize + x) * 3;
+            pixels[idx + 0] = static_cast<unsigned char>(base.r * 255.0f);
+            pixels[idx + 1] = static_cast<unsigned char>(base.g * 255.0f);
+            pixels[idx + 2] = static_cast<unsigned char>(base.b * 255.0f);
+        }
+    }
+    return createTextureFromData(kTexSize, kTexSize, pixels);
+}
+
 GLuint makeSunTexture()
 {
     constexpr int kTexSize = 512;
@@ -363,22 +484,86 @@ GLuint makeSaturnRingTexture()
     return createTextureFromDataRGBA(kW, kH, pixels);
 }
 
+GLuint makeMistTexture(const glm::vec3& tint)
+{
+    constexpr int kW = 1024;
+    constexpr int kH = 256;
+    std::vector<unsigned char> pixels(static_cast<size_t>(kW) * kH * 4);
+    for (int y = 0; y < kH; ++y)
+    {
+        float v = static_cast<float>(y) / static_cast<float>(kH - 1);
+        float edgeFade = glm::smoothstep(0.02f, 0.25f, v) * (1.0f - glm::smoothstep(0.72f, 0.98f, v));
+        for (int x = 0; x < kW; ++x)
+        {
+            float u = static_cast<float>(x) / static_cast<float>(kW - 1);
+            float swirls = 0.5f + 0.5f * std::sin(u * 42.0f + v * 11.0f + hashNoise(u * 10.0f, v * 12.0f, 5.0f) * 7.0f);
+            float wisps = hashNoise(u * 90.0f, v * 20.0f, 6.0f);
+            float alpha = edgeFade * (0.20f + swirls * 0.32f + wisps * 0.25f);
+            alpha = glm::clamp(alpha, 0.0f, 0.78f);
+            glm::vec3 c = tint * (0.70f + swirls * 0.35f);
+            c = glm::clamp(c, glm::vec3(0.04f), glm::vec3(1.0f));
+            size_t idx = static_cast<size_t>(y * kW + x) * 4;
+            pixels[idx + 0] = static_cast<unsigned char>(c.r * 255.0f);
+            pixels[idx + 1] = static_cast<unsigned char>(c.g * 255.0f);
+            pixels[idx + 2] = static_cast<unsigned char>(c.b * 255.0f);
+            pixels[idx + 3] = static_cast<unsigned char>(alpha * 255.0f);
+        }
+    }
+    return createTextureFromDataRGBA(kW, kH, pixels);
+}
+
+GLuint makeQuasarTexture()
+{
+    constexpr int kTexSize = 512;
+    std::vector<unsigned char> pixels(static_cast<size_t>(kTexSize) * kTexSize * 3);
+    for (int y = 0; y < kTexSize; ++y)
+    {
+        float v = static_cast<float>(y) / static_cast<float>(kTexSize - 1);
+        for (int x = 0; x < kTexSize; ++x)
+        {
+            float u = static_cast<float>(x) / static_cast<float>(kTexSize - 1);
+            float dx = u - 0.5f;
+            float dy = v - 0.5f;
+            float r = std::sqrt(dx * dx + dy * dy);
+            float angle = std::atan2(dy, dx);
+            float ring1 = 0.5f + 0.5f * std::sin(r * 95.0f + hashNoise(u * 6.0f, v * 6.0f, 2.0f) * 5.0f);
+            float ring2 = 0.5f + 0.5f * std::sin(r * 150.0f + angle * 5.0f);
+            float spiral = 0.5f + 0.5f * std::sin(angle * 4.5f + r * 65.0f);
+            float core = 1.0f - glm::smoothstep(0.0f, 0.22f, r);
+            float disk = 1.0f - glm::smoothstep(0.10f, 0.97f, r);
+            glm::vec3 c = glm::mix(glm::vec3(0.12f, 0.08f, 0.07f), glm::vec3(0.92f, 0.52f, 0.16f), disk);
+            c = glm::mix(c, glm::vec3(1.0f, 0.90f, 0.65f), core * 0.85f);
+            c += glm::vec3(ring1 * 0.20f + ring2 * 0.10f, ring1 * 0.11f, spiral * 0.05f) * disk;
+            c = glm::clamp(c, glm::vec3(0.0f), glm::vec3(1.0f));
+            size_t idx = static_cast<size_t>(y * kTexSize + x) * 3;
+            pixels[idx + 0] = static_cast<unsigned char>(c.r * 255.0f);
+            pixels[idx + 1] = static_cast<unsigned char>(c.g * 255.0f);
+            pixels[idx + 2] = static_cast<unsigned char>(c.b * 255.0f);
+        }
+    }
+    return createTextureFromData(kTexSize, kTexSize, pixels);
+}
+
 void initializeTextures()
 {
     gFallbackTexture = makePlanetTexture({0.6f, 0.6f, 0.6f}, 0.0f, 0.15f, false);
     gTextureCache["SUN"] = makeSunTexture();
     gTextureCache["MERCURY"] = makePlanetTexture({0.62f, 0.63f, 0.65f}, 0.10f, 0.20f, false);
     gTextureCache["VENUS"] = makePlanetTexture({0.85f, 0.74f, 0.40f}, 0.15f, 0.08f, false);
-    gTextureCache["EARTH"] = makePlanetTexture({0.18f, 0.45f, 0.82f}, 0.08f, 0.22f, true);
+    gTextureCache["EARTH"] = makeEarthTexture();
     gTextureCache["MOON"] = makePlanetTexture({0.72f, 0.72f, 0.74f}, 0.03f, 0.24f, false);
     gTextureCache["MARS"] = makePlanetTexture({0.80f, 0.34f, 0.24f}, 0.08f, 0.18f, false);
-    gTextureCache["JUPITER"] = makePlanetTexture({0.86f, 0.67f, 0.52f}, 0.42f, 0.04f, false);
-    gTextureCache["SATURN"] = makePlanetTexture({0.88f, 0.78f, 0.58f}, 0.32f, 0.04f, false);
+    gTextureCache["JUPITER"] = makeJupiterTexture();
+    gTextureCache["SATURN"] = makeSaturnTexture();
     gTextureCache["URANUS"] = makePlanetTexture({0.56f, 0.86f, 0.90f}, 0.06f, 0.06f, false);
     gTextureCache["NEPTUNE"] = makePlanetTexture({0.28f, 0.43f, 0.90f}, 0.09f, 0.06f, false);
     gTextureCache["PLUTO"] = makePlanetTexture({0.72f, 0.67f, 0.60f}, 0.06f, 0.16f, false);
     gTextureCache["BLACK HOLE"] = makePlanetTexture({0.05f, 0.05f, 0.07f}, 0.0f, 0.0f, false);
     gTextureCache["SATURN_RING"] = makeSaturnRingTexture();
+    gTextureCache["QUASAR"] = makeQuasarTexture();
+    gTextureCache["FIELD_ROCK"] = makePlanetTexture({0.66f, 0.70f, 0.76f}, 0.02f, 0.12f, false);
+    gTextureCache["KUIPER_MIST"] = makeMistTexture({0.72f, 0.78f, 0.86f});
+    gTextureCache["OORT_MIST"] = makeMistTexture({0.64f, 0.72f, 0.85f});
 }
 
 GLuint textureForBodyName(const std::string& bodyName)
@@ -411,6 +596,9 @@ void applySpinDefaults(Body& body)
     if (body.name == "URANUS") { body.spinRate = 0.52f; body.axialTiltDeg = 97.8f; return; }
     if (body.name == "NEPTUNE") { body.spinRate = 0.72f; body.axialTiltDeg = 28.3f; return; }
     if (body.name == "PLUTO") { body.spinRate = 0.11f; body.axialTiltDeg = 122.5f; return; }
+    if (body.name.find("QUASAR") != std::string::npos) { body.spinRate = 1.6f; body.axialTiltDeg = 15.0f; return; }
+    if (body.name.find("COMET") != std::string::npos) { body.spinRate = 0.42f; body.axialTiltDeg = 12.0f; return; }
+    if (body.name.find("ASTEROID") != std::string::npos) { body.spinRate = 0.68f; body.axialTiltDeg = 9.0f; return; }
     if (body.name.find("BLACK HOLE") != std::string::npos) { body.spinRate = 0.42f; body.axialTiltDeg = 12.0f; return; }
     body.spinRate = 0.45f;
     body.axialTiltDeg = 8.0f;
@@ -545,6 +733,14 @@ void drawBodyLabels(GLFWwindow* window)
 
     for (const auto& body : gBodies)
     {
+        if (body.radius < 0.14f)
+        {
+            continue;
+        }
+        if (body.name.rfind("KBO", 0) == 0 || body.name.rfind("OORT", 0) == 0)
+        {
+            continue;
+        }
         glm::vec3 anchor = body.position + glm::vec3(0.0f, body.radius + 0.85f, 0.0f);
         glm::vec3 screen = glm::project(anchor, gView, gProjection, viewport);
         if (screen.z < 0.0f || screen.z > 1.0f)
@@ -563,7 +759,7 @@ void seedSolarSystem()
     sun.position = {0.0f, 0.0f, 0.0f};
     sun.velocity = {0.0f, 0.0f, 0.0f};
     sun.mass = 12000.0f;
-    sun.radius = 2.0f;
+    sun.radius = 2.0f * kBodySizeScale;
     sun.name = "SUN";
     sun.color = {1.0f, 0.77f, 0.18f};
     assignBodyTexture(sun);
@@ -576,7 +772,7 @@ void seedSolarSystem()
         float speed = std::sqrt(kG * sun.mass / orbitalRadius) * speedFactor;
         p.velocity = {0.0f, 0.0f, speed};
         p.mass = mass;
-        p.radius = radius;
+        p.radius = radius * kBodySizeScale;
         p.name = name;
         p.color = color;
         assignBodyTexture(p);
@@ -597,7 +793,7 @@ void seedSolarSystem()
     Body moon;
     moon.name = "MOON";
     moon.mass = 0.0085f;
-    moon.radius = 0.11f;
+    moon.radius = 0.11f * kBodySizeScale;
     moon.color = {0.85f, 0.85f, 0.9f};
     moon.isMoon = true;
     moon.parentName = "EARTH";
@@ -609,6 +805,60 @@ void seedSolarSystem()
     assignBodyTexture(moon);
     applySpinDefaults(moon);
     addBody(moon);
+
+    // Kuiper Belt small bodies.
+    std::uniform_real_distribution<float> angleDist(0.0f, glm::two_pi<float>());
+    std::uniform_real_distribution<float> radiusJitter(-4.5f, 4.5f);
+    std::uniform_real_distribution<float> yJitter(-0.8f, 0.8f);
+    for (int i = 0; i < 180; ++i)
+    {
+        float baseR = 57.0f + radiusJitter(gRng);
+        float a = angleDist(gRng);
+        Body kbo;
+        kbo.name = "KBO " + std::to_string(i + 1);
+        kbo.position = {baseR * std::cos(a), 2.8f + yJitter(gRng), baseR * std::sin(a)};
+        glm::vec3 tangent = glm::normalize(glm::cross(glm::vec3(0.0f, 1.0f, 0.0f), glm::normalize(-kbo.position)));
+        kbo.velocity = tangent * std::sqrt(kG * sun.mass / baseR) * 0.93f;
+        kbo.mass = 0.0025f;
+        kbo.radius = 0.055f * kBodySizeScale;
+        kbo.color = {0.58f, 0.6f, 0.66f};
+        kbo.textureId = gTextureCache["FIELD_ROCK"];
+        kbo.spinRate = 0.32f;
+        kbo.showTrail = false;
+        kbo.isFieldParticle = true;
+        addBody(kbo);
+    }
+
+    // Oort Cloud sparse halo bodies.
+    std::uniform_real_distribution<float> cloudR(92.0f, 130.0f);
+    std::uniform_real_distribution<float> unitDist(-1.0f, 1.0f);
+    for (int i = 0; i < 260; ++i)
+    {
+        glm::vec3 dir{unitDist(gRng), unitDist(gRng), unitDist(gRng)};
+        if (glm::length(dir) < 0.1f)
+        {
+            dir = {1.0f, 0.0f, 0.0f};
+        }
+        dir = glm::normalize(dir);
+        float r = cloudR(gRng);
+        Body oort;
+        oort.name = "OORT " + std::to_string(i + 1);
+        oort.position = dir * r + glm::vec3(0.0f, 7.0f, 0.0f);
+        glm::vec3 tangent = glm::normalize(glm::cross(glm::vec3(0.0f, 1.0f, 0.0f), dir));
+        if (glm::length(tangent) < 0.01f)
+        {
+            tangent = glm::normalize(glm::cross(glm::vec3(1.0f, 0.0f, 0.0f), dir));
+        }
+        oort.velocity = tangent * std::sqrt(kG * sun.mass / r) * 0.66f;
+        oort.mass = 0.0018f;
+        oort.radius = 0.045f * kBodySizeScale;
+        oort.color = {0.65f, 0.7f, 0.78f};
+        oort.textureId = gTextureCache["FIELD_ROCK"];
+        oort.spinRate = 0.25f;
+        oort.showTrail = false;
+        oort.isFieldParticle = true;
+        addBody(oort);
+    }
 }
 
 void spawnPlanet()
@@ -634,7 +884,7 @@ void spawnPlanet()
     p.position = pos;
     p.velocity = tangent * speed;
     p.mass = mDist(gRng);
-    p.radius = radDist(gRng);
+    p.radius = radDist(gRng) * kBodySizeScale;
     p.color = {cDist(gRng), cDist(gRng), cDist(gRng)};
     p.textureId = makePlanetTexture(p.color, 0.10f + cDist(gRng) * 0.26f, 0.06f + cDist(gRng) * 0.20f, cDist(gRng) > 0.74f);
     gDynamicTextures.push_back(p.textureId);
@@ -651,15 +901,65 @@ void spawnBlackHole()
     Body bh;
     ++gSpawnedBlackHoleCount;
     bh.name = "BLACK HOLE #" + std::to_string(gSpawnedBlackHoleCount);
-    bh.position = {r * std::cos(angle), 0.0f, r * std::sin(angle)};
+    bh.position = {r * std::cos(angle), 6.0f, r * std::sin(angle)};
     bh.velocity = {0.0f, 0.0f, std::sqrt(kG * gBodies.front().mass / r) * 0.68f};
     bh.mass = 1300.0f;
-    bh.radius = 0.82f;
+    bh.radius = 0.82f * kBodySizeScale;
     bh.color = {0.05f, 0.05f, 0.08f};
     bh.isBlackHole = true;
     assignBodyTexture(bh);
     applySpinDefaults(bh);
     addBody(bh);
+}
+
+void spawnQuasar()
+{
+    std::uniform_real_distribution<float> angleDist(0.0f, glm::two_pi<float>());
+    float r = 70.0f;
+    float angle = angleDist(gRng);
+    Body q;
+    ++gSpawnedQuasarCount;
+    q.name = "QUASAR #" + std::to_string(gSpawnedQuasarCount);
+    q.position = {r * std::cos(angle), 9.0f, r * std::sin(angle)};
+    q.velocity = {0.0f, 0.0f, std::sqrt(kG * gBodies.front().mass / r) * 0.32f};
+    q.mass = 4200.0f;
+    q.radius = 1.45f * kBodySizeScale;
+    q.color = {0.04f, 0.04f, 0.05f};
+    q.isBlackHole = true;
+    q.textureId = textureForBodyName("BLACK HOLE");
+    q.spinRate = 1.25f;
+    q.axialTiltDeg = 19.0f;
+    addBody(q);
+}
+
+void spawnCometOrAsteroid()
+{
+    std::uniform_real_distribution<float> choose(0.0f, 1.0f);
+    std::uniform_real_distribution<float> angleDist(0.0f, glm::two_pi<float>());
+    std::uniform_real_distribution<float> colorDist(0.2f, 1.0f);
+    bool comet = choose(gRng) > 0.45f;
+    float r = comet ? 92.0f : 52.0f;
+    float angle = angleDist(gRng);
+    glm::vec3 pos{r * std::cos(angle), comet ? 4.0f : 0.8f, r * std::sin(angle)};
+    const Body& sun = gBodies.front();
+    glm::vec3 dirToSun = glm::normalize(sun.position - pos);
+    glm::vec3 tangent = glm::normalize(glm::cross(glm::vec3(0.0f, 1.0f, 0.0f), dirToSun));
+
+    Body obj;
+    ++gSpawnedCometCount;
+    obj.name = (comet ? "COMET #" : "ASTEROID #") + std::to_string(gSpawnedCometCount);
+    obj.position = pos;
+    obj.mass = comet ? 0.0045f : 0.013f;
+    obj.radius = (comet ? 0.18f : 0.16f) * kBodySizeScale;
+    obj.color = comet ? glm::vec3(0.82f, 0.88f, 1.0f) : glm::vec3(0.55f, 0.53f, 0.50f);
+    float speed = std::sqrt(kG * sun.mass / r) * (comet ? 0.68f : 0.92f);
+    obj.velocity = tangent * speed + dirToSun * (comet ? speed * 0.54f : speed * 0.08f);
+    obj.textureId = makePlanetTexture(obj.color, comet ? 0.02f : 0.07f, comet ? 0.05f : 0.23f, false);
+    gDynamicTextures.push_back(obj.textureId);
+    obj.spinRate = comet ? 0.45f : 0.72f;
+    obj.axialTiltDeg = comet ? 12.0f : 18.0f;
+    obj.showTrail = comet;
+    addBody(obj);
 }
 
 void buildSphereMesh(int stacks, int slices)
@@ -865,8 +1165,17 @@ void resolveCollisions()
 {
     for (size_t i = 0; i < gBodies.size(); ++i)
     {
+        if (gBodies[i].isFieldParticle)
+        {
+            continue;
+        }
         for (size_t j = i + 1; j < gBodies.size();)
         {
+            if (gBodies[j].isFieldParticle)
+            {
+                ++j;
+                continue;
+            }
             float r = glm::length(gBodies[j].position - gBodies[i].position);
             float combined = gBodies[i].radius + gBodies[j].radius;
             if (r <= combined)
@@ -918,6 +1227,49 @@ void resolveCollisions()
     }
 }
 
+bool isSmallBodyConsumable(const Body& b)
+{
+    return b.isFieldParticle || b.name.rfind("COMET #", 0) == 0 || b.name.rfind("ASTEROID #", 0) == 0;
+}
+
+void absorbSmallBodiesBySingularities()
+{
+    for (size_t i = 0; i < gBodies.size(); ++i)
+    {
+        if (!(gBodies[i].isBlackHole || gBodies[i].name.find("QUASAR") != std::string::npos))
+        {
+            continue;
+        }
+
+        const float captureRadius = gBodies[i].radius * 3.4f;
+        for (size_t j = 0; j < gBodies.size();)
+        {
+            if (i == j || !isSmallBodyConsumable(gBodies[j]))
+            {
+                ++j;
+                continue;
+            }
+            float d = glm::length(gBodies[j].position - gBodies[i].position);
+            if (d <= captureRadius)
+            {
+                float m1 = gBodies[i].mass;
+                float m2 = gBodies[j].mass;
+                float m = m1 + m2;
+                gBodies[i].velocity = (gBodies[i].velocity * m1 + gBodies[j].velocity * m2) / m;
+                gBodies[i].mass = m;
+                gBodies[i].radius *= 1.0007f;
+                gBodies.erase(gBodies.begin() + static_cast<long long>(j));
+                if (j < i)
+                {
+                    --i;
+                }
+                continue;
+            }
+            ++j;
+        }
+    }
+}
+
 void integratePhysics()
 {
     const size_t n = gBodies.size();
@@ -940,6 +1292,10 @@ void integratePhysics()
         for (size_t j = i + 1; j < n; ++j)
         {
             if (!dynamicBody[j])
+            {
+                continue;
+            }
+            if (gBodies[i].isFieldParticle || gBodies[j].isFieldParticle)
             {
                 continue;
             }
@@ -1007,6 +1363,10 @@ void integratePhysics()
 
     for (size_t i = 0; i < n; ++i)
     {
+        if (!gBodies[i].showTrail)
+        {
+            continue;
+        }
         gBodies[i].trail.push_back(gBodies[i].position);
         if (gBodies[i].trail.size() > kTrailLength)
         {
@@ -1015,6 +1375,7 @@ void integratePhysics()
     }
 
     resolveCollisions();
+    absorbSmallBodiesBySingularities();
 }
 
 void drawBody(const Body& body, GLint modelLoc, GLint colorLoc, GLint emissiveLoc, GLint useTextureLoc, GLint alphaLoc, GLint lightingEnabledLoc)
@@ -1039,6 +1400,10 @@ void drawBody(const Body& body, GLint modelLoc, GLint colorLoc, GLint emissiveLo
     {
         emissive = 0.62f;
     }
+    if (body.name.find("QUASAR") != std::string::npos)
+    {
+        emissive = 1.25f;
+    }
     glUniform1f(emissiveLoc, emissive);
     glUniform1f(useTextureLoc, 1.0f);
     glUniform1f(alphaLoc, 1.0f);
@@ -1060,6 +1425,10 @@ void drawTrails(GLint modelLoc, GLint colorLoc, GLint emissiveLoc, GLint useText
 
     for (const auto& b : gBodies)
     {
+        if (!b.showTrail)
+        {
+            continue;
+        }
         if (b.trail.size() < 2)
         {
             continue;
@@ -1116,6 +1485,259 @@ void drawSaturnRing(const Body& saturn, GLint modelLoc, GLint colorLoc, GLint em
     glDrawElements(GL_TRIANGLES, gRingIndexCount, GL_UNSIGNED_INT, nullptr);
 }
 
+void drawFieldMist()
+{
+    glUseProgram(0);
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    glEnable(GL_POINT_SMOOTH);
+    glPointSize(6.0f);
+
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadMatrixf(glm::value_ptr(gProjection));
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadMatrixf(glm::value_ptr(gView));
+
+    glBegin(GL_POINTS);
+    for (const auto& b : gBodies)
+    {
+        if (!b.isFieldParticle)
+        {
+            continue;
+        }
+        bool oort = b.name.rfind("OORT", 0) == 0;
+        float tint = oort ? 1.10f : 0.92f;
+        float alpha = oort ? 0.55f : 0.74f;
+        glColor4f(b.color.r * tint, b.color.g * tint, b.color.b * 1.07f, alpha);
+        glVertex3f(b.position.x, b.position.y, b.position.z);
+    }
+    glEnd();
+
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    glDisable(GL_POINT_SMOOTH);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_DEPTH_TEST);
+}
+
+void drawKuiperMist(GLint modelLoc, GLint colorLoc, GLint emissiveLoc, GLint useTextureLoc, GLint alphaLoc, GLint lightingEnabledLoc)
+{
+    auto it = gTextureCache.find("KUIPER_MIST");
+    if (it == gTextureCache.end() || gRingVao == 0)
+    {
+        return;
+    }
+
+    glDepthMask(GL_FALSE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+
+    for (int layer = 0; layer < 3; ++layer)
+    {
+        float s = 58.0f + static_cast<float>(layer) * 2.4f;
+        glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 3.2f + layer * 0.45f, 0.0f));
+        model = glm::rotate(model, glm::radians(6.0f + layer * 3.5f), glm::vec3(1.0f, 0.0f, 0.0f));
+        model = glm::rotate(model, glm::radians(14.0f + layer * 9.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+        model = glm::scale(model, glm::vec3(s));
+        glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(model));
+        glUniform3f(colorLoc, 0.72f, 0.79f, 0.90f);
+        glUniform1f(emissiveLoc, 0.07f);
+        glUniform1f(useTextureLoc, 1.0f);
+        glUniform1f(alphaLoc, 0.50f - layer * 0.08f);
+        glUniform1f(lightingEnabledLoc, 0.0f);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, it->second);
+        glBindVertexArray(gRingVao);
+        glDrawElements(GL_TRIANGLES, gRingIndexCount, GL_UNSIGNED_INT, nullptr);
+    }
+
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_TRUE);
+}
+
+void drawOortMist(GLint modelLoc, GLint colorLoc, GLint emissiveLoc, GLint useTextureLoc, GLint alphaLoc, GLint lightingEnabledLoc)
+{
+    auto it = gTextureCache.find("OORT_MIST");
+    if (it == gTextureCache.end() || gSphereVao == 0)
+    {
+        return;
+    }
+
+    glDepthMask(GL_FALSE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    for (int shell = 0; shell < 3; ++shell)
+    {
+        float shellRadius = 102.0f + shell * 10.0f;
+        glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 7.0f, 0.0f));
+        model = glm::scale(model, glm::vec3(shellRadius));
+        glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(model));
+        glUniform3f(colorLoc, 0.62f, 0.69f, 0.82f);
+        glUniform1f(emissiveLoc, 0.03f);
+        glUniform1f(useTextureLoc, 1.0f);
+        glUniform1f(alphaLoc, 0.10f - shell * 0.02f);
+        glUniform1f(lightingEnabledLoc, 0.0f);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, it->second);
+        glBindVertexArray(gSphereVao);
+        glDrawElements(GL_TRIANGLES, gSphereIndexCount, GL_UNSIGNED_INT, nullptr);
+    }
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_TRUE);
+}
+
+void drawQuasarDisk(const Body& quasar, GLint modelLoc, GLint colorLoc, GLint emissiveLoc, GLint useTextureLoc, GLint alphaLoc, GLint lightingEnabledLoc)
+{
+    (void)modelLoc;
+    (void)colorLoc;
+    (void)emissiveLoc;
+    (void)useTextureLoc;
+    (void)alphaLoc;
+    (void)lightingEnabledLoc;
+
+    glUseProgram(0);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    glDisable(GL_DEPTH_TEST);
+
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadMatrixf(glm::value_ptr(gProjection));
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadMatrixf(glm::value_ptr(gView));
+
+    // Spiral accretion disk: larger, thicker warm spiral arms centered on black hole mid-plane.
+    for (int arm = 0; arm < 4; ++arm)
+    {
+        float phase = quasar.spinAngle * 1.35f + arm * (glm::two_pi<float>() / 4.0f);
+        glLineWidth(3.6f);
+        glBegin(GL_LINE_STRIP);
+        for (int i = 0; i <= 150; ++i)
+        {
+            float t = static_cast<float>(i) / 150.0f;
+            float r = quasar.radius * (0.40f + t * 6.0f);
+            float a = phase + t * 9.8f;
+            float y = quasar.position.y - quasar.radius * 0.18f;
+            glm::vec3 p = quasar.position + glm::vec3(std::cos(a) * r, y, std::sin(a) * r);
+            float alpha = (1.0f - t) * 0.60f;
+            glColor4f(1.0f, 0.66f + 0.22f * (1.0f - t), 0.24f, alpha);
+            glVertex3f(p.x, p.y, p.z);
+        }
+        glEnd();
+    }
+    glLineWidth(1.0f);
+
+    // Inner bright ring glow around the black hole.
+    glBegin(GL_LINE_STRIP);
+    for (int i = 0; i <= 240; ++i)
+    {
+        float t = static_cast<float>(i) / 240.0f;
+        float a = t * glm::two_pi<float>() + quasar.spinAngle * 1.8f;
+        float r = quasar.radius * 0.9f;
+        glm::vec3 p = quasar.position + glm::vec3(std::cos(a) * r, -quasar.radius * 0.18f, std::sin(a) * r);
+        glColor4f(1.0f, 0.9f, 0.72f, 0.65f);
+        glVertex3f(p.x, p.y, p.z);
+    }
+    glEnd();
+
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    glEnable(GL_DEPTH_TEST);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+}
+
+void drawQuasarJet(const Body& quasar)
+{
+    glUseProgram(0);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    glDisable(GL_DEPTH_TEST);
+
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadMatrixf(glm::value_ptr(gProjection));
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadMatrixf(glm::value_ptr(gView));
+
+    const glm::vec3 p0 = quasar.position + glm::vec3(0.0f, quasar.radius * 0.2f, 0.0f);
+    const glm::vec3 p1 = quasar.position + glm::vec3(0.0f, quasar.radius * 7.2f, 0.0f);
+    const glm::vec3 p2 = quasar.position - glm::vec3(0.0f, quasar.radius * 4.8f, 0.0f);
+
+    glLineWidth(7.5f);
+    glBegin(GL_LINES);
+    glColor4f(0.95f, 0.96f, 1.0f, 0.18f);
+    glVertex3f(p1.x, p1.y, p1.z);
+    glVertex3f(p2.x, p2.y, p2.z);
+    glEnd();
+
+    glLineWidth(2.8f);
+    glBegin(GL_LINES);
+    glColor4f(1.0f, 1.0f, 1.0f, 0.95f);
+    glVertex3f(p1.x, p1.y, p1.z);
+    glVertex3f(p0.x, p0.y, p0.z);
+    glColor4f(0.92f, 0.95f, 1.0f, 0.70f);
+    glVertex3f(p0.x, p0.y, p0.z);
+    glVertex3f(p2.x, p2.y, p2.z);
+    glEnd();
+
+    glLineWidth(1.0f);
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    glEnable(GL_DEPTH_TEST);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+}
+
+void drawQuasarSpiralStreaks(const Body& quasar)
+{
+    glUseProgram(0);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    glDisable(GL_DEPTH_TEST);
+
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadMatrixf(glm::value_ptr(gProjection));
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadMatrixf(glm::value_ptr(gView));
+
+    for (int arm = 0; arm < 3; ++arm)
+    {
+        float phase = static_cast<float>(arm) * (glm::two_pi<float>() / 3.0f);
+        glBegin(GL_LINE_STRIP);
+        for (int i = 0; i <= 84; ++i)
+        {
+            float t = static_cast<float>(i) / 84.0f;
+            float r = quasar.radius * (0.25f + t * 3.2f);
+            float a = phase + t * 7.2f + quasar.spinAngle * 1.35f;
+            float y = quasar.position.y + (t - 0.5f) * quasar.radius * 0.55f;
+            glm::vec3 p = quasar.position + glm::vec3(std::cos(a) * r, y - quasar.radius * 0.18f, std::sin(a) * r);
+            float alpha = (1.0f - t) * 0.55f;
+            glColor4f(1.0f, 0.62f + 0.25f * (1.0f - t), 0.22f, alpha);
+            glVertex3f(p.x, p.y, p.z);
+        }
+        glEnd();
+    }
+
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    glEnable(GL_DEPTH_TEST);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+}
+
 void processInput(GLFWwindow* window)
 {
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
@@ -1136,6 +1758,20 @@ void processInput(GLFWwindow* window)
         spawnBlackHole();
     }
     gSpawnBlackHolePressed = bDown;
+
+    bool qDown = glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS;
+    if (qDown && !gSpawnQuasarPressed)
+    {
+        spawnQuasar();
+    }
+    gSpawnQuasarPressed = qDown;
+
+    bool cDown = glfwGetKey(window, GLFW_KEY_C) == GLFW_PRESS;
+    if (cDown && !gSpawnCometPressed)
+    {
+        spawnCometOrAsteroid();
+    }
+    gSpawnCometPressed = cDown;
 
     bool spaceDown = glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS;
     if (spaceDown && !gPausePressed)
@@ -1163,11 +1799,11 @@ void processInput(GLFWwindow* window)
     {
         gCameraTarget += right * panStep;
     }
-    if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS)
+    if (glfwGetKey(window, GLFW_KEY_Z) == GLFW_PRESS)
     {
         gCameraTarget += gCameraUp * panStep;
     }
-    if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS)
+    if (glfwGetKey(window, GLFW_KEY_X) == GLFW_PRESS)
     {
         gCameraTarget -= gCameraUp * panStep;
     }
@@ -1300,11 +1936,13 @@ int main()
     std::cout << "Controls:\n";
     std::cout << "  P: Spawn a random planet\n";
     std::cout << "  B: Spawn a black hole\n";
+    std::cout << "  Q: Spawn a quasar\n";
+    std::cout << "  C: Spawn an asteroid/comet\n";
     std::cout << "  SPACE: Pause/Resume simulation\n";
     std::cout << "  Mouse Left Drag: Orbit camera\n";
     std::cout << "  Mouse Right Drag: Pan camera\n";
     std::cout << "  Mouse Wheel / +/-: Zoom\n";
-    std::cout << "  WASDQE: Pan/Fly camera target\n";
+    std::cout << "  WASD + Z/X: Pan/Fly camera target\n";
     std::cout << "  R: Reset camera\n";
     std::cout << "  ESC: Exit\n";
 
@@ -1341,16 +1979,28 @@ int main()
         glUniform3fv(viewPosLoc, 1, glm::value_ptr(gCameraPos));
 
         drawGrid(modelLoc, colorLoc, emissiveLoc, useTextureLoc, alphaLoc, lightingEnabledLoc);
+        drawKuiperMist(modelLoc, colorLoc, emissiveLoc, useTextureLoc, alphaLoc, lightingEnabledLoc);
+        drawOortMist(modelLoc, colorLoc, emissiveLoc, useTextureLoc, alphaLoc, lightingEnabledLoc);
         drawTrails(modelLoc, colorLoc, emissiveLoc, useTextureLoc, alphaLoc, lightingEnabledLoc);
 
         for (const auto& b : gBodies)
         {
+            if (b.isFieldParticle)
+            {
+                continue;
+            }
             drawBody(b, modelLoc, colorLoc, emissiveLoc, useTextureLoc, alphaLoc, lightingEnabledLoc);
             if (b.name == "SATURN")
             {
                 drawSaturnRing(b, modelLoc, colorLoc, emissiveLoc, useTextureLoc, alphaLoc, lightingEnabledLoc);
             }
+            if (b.name.find("QUASAR") != std::string::npos)
+            {
+                drawQuasarDisk(b, modelLoc, colorLoc, emissiveLoc, useTextureLoc, alphaLoc, lightingEnabledLoc);
+                drawQuasarJet(b);
+            }
         }
+        drawFieldMist();
         drawBodyLabels(window);
 
         glfwSwapBuffers(window);
